@@ -1,0 +1,66 @@
+name: test
+# Pull requests run the Ubuntu unit job. A release tag or a manual run also runs Windows and a real Hermes install
+# on Ubuntu and Windows. macOS is tested locally with npm test.
+permissions:
+  contents: read
+on:
+  pull_request:
+    paths-ignore: ["docs/**", "**/*.md"]
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  unit:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest","windows-latest"]') }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install fastapi psutil
+      - run: npm ci
+      - run: node --test tests/
+      - run: python -m unittest discover -s tests -p "test_*.py"
+
+  # Real Hermes (official source installers, Tier 1 per the Hermes platform-support page). Release/manual runs only.
+  hermes:
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Hermes (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --non-interactive
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "HERMES_HOME=$HOME/.hermes" >> "$GITHUB_ENV"
+      - name: Install Hermes (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & ([scriptblock]::Create((irm https://hermes-agent.nousresearch.com/install.ps1))) -NonInteractive
+          "$env:LOCALAPPDATA\hermes\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          "HERMES_HOME=$env:LOCALAPPDATA\hermes" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - run: hermes --version
+      - name: Install the plugin, enable it, call its routes on a running Hermes
+        run: python tools/ci-real-hermes.py

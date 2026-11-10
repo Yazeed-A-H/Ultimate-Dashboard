@@ -1,0 +1,19 @@
+{
+  "name": "ultimate-dashboard",
+  "private": true,
+  "version": "0.4.1",
+  "description": "Customizable dashboard page for Hermes Desktop and the Webapp.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Yazeed-A-H/Ultimate-Dashboard.git"
+  },
+  "type": "module",
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "test": "node --test tests/ && python3 -m unittest discover -s tests -p 'test_*.py'"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.12"
+  }
+}

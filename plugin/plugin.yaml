@@ -1,0 +1,6 @@
+name: ultimate-dashboard
+version: 0.4.1
+description: A customizable dashboard for Hermes Desktop and the Webapp. Shows approvals, running sessions, scheduled jobs, usage, services, machine stats, files and Workers, plus Spend, Activity, Health, Logs, Memory and Skills cards.
+author: Yazeed Bin Humaid
+requires_hermes: ">=0.23.0"
+license: MIT

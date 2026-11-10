@@ -1,0 +1,2 @@
+# LF everywhere so the built bundle gives the same bytes on Windows checkouts.
+* text=auto eol=lf

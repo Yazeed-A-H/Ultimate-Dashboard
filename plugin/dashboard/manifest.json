@@ -1,0 +1,1 @@
+{ "name": "ultimate-dashboard", "label": "Ultimate Dashboard", "tab": { "path": "/ultimate-dashboard", "hidden": true }, "api": "plugin_api.py" }
