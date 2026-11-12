@@ -153,6 +153,11 @@ export function useWorkers(range) {
   const every = useRefresh(), on = useBackendOn()
   return useQuery({ queryKey: qk('workers', range), queryFn: () => rest(`/workers?days=${range === 'today' ? 'today' : parseInt(range, 10)}&limit=60`), refetchInterval: minMs(every, 60e3), retry: 0, enabled: on })
 }
+// The user's last 30 days of Workers: only the base for the "usual finish" estimate on the Live tasks card, so it is read slowly.
+export function useWorkerHistory() {
+  const every = useRefresh(), on = useBackendOn()
+  return useQuery({ queryKey: qk('workers-usual'), queryFn: () => rest('/workers?days=30&limit=200'), refetchInterval: minMs(every, 300e3), retry: 0, enabled: on })
+}
 export function useMemory() {
   const every = useRefresh(), on = useBackendOn()
   return useQuery({ queryKey: qk('memory'), queryFn: () => rest('/memory'), refetchInterval: minMs(every, 60e3), retry: 0, enabled: on })
@@ -164,6 +169,11 @@ export function useSpend(range) {
 export function useActivity(range) {
   const every = useRefresh(), on = useBackendOn()
   return useQuery({ queryKey: qk('activity', range), queryFn: () => rest(`/activity?days=${range === 'today' ? 'today' : parseInt(range, 10)}&limit=10`), refetchInterval: minMs(every, 60e3), retry: 1, enabled: on })
+}
+// 5 s while the last answer says something runs (the lanes move), else the user's refresh, never faster than 15 s; Manually = no timer.
+export function useLive() {
+  const every = useRefresh(), on = useBackendOn()
+  return useQuery({ queryKey: qk('live'), queryFn: () => rest('/live'), refetchInterval: q => (every === false ? false : q.state.data?.running === true ? 5e3 : minMs(every, 15e3)), retry: 0, enabled: on })
 }
 export function useJobOutput(id) {
   const every = useRefresh(), on = useBackendOn()

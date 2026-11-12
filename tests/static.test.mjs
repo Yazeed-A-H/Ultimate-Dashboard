@@ -95,11 +95,11 @@ test('card ids, view names and removed i18n keys', () => {
   for (const k of ['card.k-wait', 'card.running', 'card.pinned-cron', 'wait.c', 'u.top', 's.range', 's.hideGreet', 's.backend', 'act.customize']) assert.equal(k in FLAT.en, false, k)
   assert.equal(FLAT.en['view.ops'], 'System'); assert.equal(FLAT.ar['view.ops'], 'النظام')
   assert.equal(FLAT.en['act.editLayout'], 'Edit layout'); assert.equal(FLAT.en['act.settings'], 'Settings')
-  for (const l of ['en', 'ar']) for (const id of ['approvals', 'recent-sessions', 'cron', 'usage', 'recent-files', 'services', 'machine', 'workers', 'job-result', 'health', 'logs', 'memory', 'skills', 'spend', 'activity']) assert.ok(FLAT[l]['card.' + id] && FLAT[l]['desc.' + id], `${l} ${id}`)
+  for (const l of ['en', 'ar']) for (const id of ['approvals', 'recent-sessions', 'cron', 'usage', 'recent-files', 'services', 'machine', 'workers', 'job-result', 'health', 'logs', 'memory', 'skills', 'spend', 'activity', 'live']) assert.ok(FLAT[l]['card.' + id] && FLAT[l]['desc.' + id], `${l} ${id}`)
 })
 
 // Keys built at run time (`t('card.' + id)`): used when their prefix is one of these. Everything else must appear as a literal.
-const DYNAMIC = ['run.status.', 'cron.st.', 'svc.', 'card.', 'desc.', 'range.', 'tpl.', 'size.', 'opt.', 'f.', 'r.', 'icon.', 'imp.', 'greet.', 'view.', 'u.w.', 'u.d.', 'hl.']
+const DYNAMIC = ['run.status.', 'cron.st.', 'svc.', 'card.', 'desc.', 'range.', 'tpl.', 'size.', 'opt.', 'f.', 'r.', 'icon.', 'imp.', 'greet.', 'view.', 'u.w.', 'u.d.', 'hl.', 'lv.t.']
 test('every i18n key is used (literally or by a known dynamic prefix)', () => {
   const text = [...src.map(([, s]) => s), ...allSrc].join('\n')
   const unused = Object.keys(FLAT.en).filter(k => !DYNAMIC.some(p => k.startsWith(p)) && !text.includes(`'${k}'`) && !text.includes(`"${k}"`) && !['nav', 'title'].includes(k))
@@ -130,6 +130,7 @@ test('the sources keep the a11y and cost promises', () => {
   assert.match(data, /placeholderData: prev => prev/, 'last usage stays while the next loads')
   assert.match(data, /s\.status && s\.status !== 'idle'/, 'approval.pending only for sessions that are not idle')
   assert.match(data, /15e3 : 60e3/, 'approvals: 15 s while one waits, else 60 s')
+  assert.match(data, /every === false \? false : q\.state\.data\?\.running === true \? 5e3 : minMs\(every, 15e3\)/, 'live: 5 s while a task runs, else the user\'s refresh (15 s at the fastest), manual = no timer')
   assert.match(by['runtime.js'], /R\.mounts > 0/, 'the /state poll runs only while a page is on screen')
   assert.match(by['page.jsx'], /'Home'[\s\S]*'End'/, 'view tabs: Home / End')
   assert.doesNotMatch(by['parts.jsx'], /role="status"><div className="ht-skel"/, 'no live region per loading card')
@@ -141,6 +142,8 @@ test('the sources keep the a11y and cost promises', () => {
 test('refresh button: busy spin respects reduced motion, announces via the live region', () => {
   const css = src.find(([f]) => f === 'css.js')[1], page = src.find(([f]) => f === 'page.jsx')[1]
   assert.match(css, /prefers-reduced-motion: reduce\) \{ \.ht-spin \{ animation: none/)
+  assert.match(css, /prefers-reduced-motion: reduce\)[^\n]*\.ht-lv-f\[data-none\][^\n]*animation: none/, 'the live pulses (dot, no-estimate bar) are static under reduced motion')
+  assert.match(css, /prefers-reduced-motion: reduce\)[^\n]*\.ht \* \{ transition: none !important/, 'the bar fill does not ease under reduced motion')
   assert.match(page, /aria-busy=\{busy/)
   for (const k of ['act.refreshed', 'act.refreshPartial', 'act.refreshing']) for (const l of ['en', 'ar']) assert.equal(typeof FLAT[l][k], 'string')
 })
@@ -196,7 +199,7 @@ test('approval text: Arabic/Persian/emoji joiners survive in both tiers; bidi ov
 test('untrusted job output and quick launch stay inert', () => {
   const cards = src.find(([f]) => f === 'cards.jsx')[1], all = src.map(([, s]) => s).join('\n')
   assert.match(cards, /<Streamdown[^>]*rehypePlugins=\{\[\]\}[^>]*components=\{MD\}/)
-  assert.match(cards, /const MD = \{ a: .*img: /)
+  assert.match(cards, /const MD = \{\s*a: [^\n]*webUrl\(href\)[^\n]*\s*img: /) // only http(s) links are anchors
   assert.doesNotMatch(all, /host\.request\('[^']*submit/); assert.doesNotMatch(all, /composer\.submit\(/)
 })
 

@@ -10,7 +10,7 @@ const ids = s => s.activeView().cards.map(c => c.id)
 
 test('cards: proto ids never resolve; options sanitized', () => {
   assert.equal(getCard('__proto__'), undefined)
-  assert.equal(CARDS.length, 15)
+  assert.equal(CARDS.length, 16)
   assert.deepEqual(CARDS.filter(c => c.multi).map(c => c.id), ['job-result'])
   assert.deepEqual(sanitizeOptions('recent-files', { range: '7d', fields: ['type', 'bogus', 'type'], title: '  x  ', evil: 1 }), { range: '7d', fields: ['type'], title: 'x' })
   assert.deepEqual(sanitizeOptions('services', { range: '7d' }), {}) // services has no range

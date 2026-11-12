@@ -91,7 +91,7 @@ You don't need this step for the card to work: the gallery lists every registere
 
 ## 7. Tests
 
-- `tests/state.test.mjs`: bump the `assert.equal(CARDS.length, …)` count (15 today).
+- `tests/state.test.mjs`: bump the `assert.equal(CARDS.length, …)` count (16 today).
 - `tests/static.test.mjs`: add the id to the list that checks `card.<id>` and `desc.<id>` in both locales.
 - Add a sanitize test if the card has new options.
 

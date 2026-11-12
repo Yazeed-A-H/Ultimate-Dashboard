@@ -73,12 +73,17 @@ const en = {
   'card.memory': 'Agent memory', 'desc.memory': 'How full MEMORY.md and USER.md are against their limits, and when they last changed.', 'mem.agent': 'Agent notes', 'mem.user': 'About you', 'mem.off': 'Off', 'mem.empty': 'Empty', 'mem.edited': 'Edited {t}', 'mem.provider': 'External provider',
   'mem.entries': P('en', { one: '{n} entry', other: '{n} entries' }),
   'card.job-result': 'Job result', 'desc.job-result': 'The latest result of a scheduled job you choose. Add one card per job.', 'opt.job': 'Scheduled job',
-  'jr.pick': 'Choose a scheduled job', 'jr.pickD': 'This card shows the latest result of the job you choose.', 'jr.choose': 'Choose a job', 'jr.none': 'No runs yet.', 'jr.gone': 'This job no longer exists.', 'jr.noJobs': 'You have no scheduled jobs yet.',
-  'jr.more': 'Show more', 'jr.less': 'Show less', 'jr.truncated': 'Showing the first 64 KB.', 'jr.ranAt': 'Ran {time}', 'jr.open': 'Open scheduled jobs',
+  'jr.pick': 'Choose a scheduled job', 'jr.pickD': 'This card shows the latest result of the job you choose.', 'jr.choose': 'Choose a job', 'jr.none': 'No runs yet.', 'jr.silent': 'The last run produced no output.', 'jr.gone': 'This job no longer exists.', 'jr.noJobs': 'You have no scheduled jobs yet.',
+  'jr.more': 'Show more', 'jr.less': 'Show less', 'jr.truncated': 'Showing the first 64 KB.', 'jr.ranAt': 'Ran {time}', 'jr.open': 'Open scheduled jobs', 'jr.chat': 'Discuss', 'jr.chatL': 'Discuss {job} in a new chat',
   'card.logs': 'Logs', 'desc.logs': 'The latest lines of Hermes logs, coloured by level.',
   'lg.file': 'Log file', 'lg.agent': 'Agent', 'lg.errors': 'Errors', 'lg.gateway': 'Gateway', 'lg.gui': 'GUI', 'lg.level': 'Level', 'lg.all': 'All', 'lg.warn': 'Warnings+', 'lg.err': 'Errors+',
   'lg.empty': 'No log lines', 'lg.emptyLv': 'No lines at this level', 'lg.noApi': 'This Hermes version does not expose logs to plugins.', 'lg.lines': P('en', { one: '{n} line', other: '{n} lines' }),
   'gal.addAnother': 'Add another', 'ob.jobT': 'Show the result of a scheduled job here?', 'ob.jobD': 'Add a card with the latest result of a job. You can add more from Cards.', 'ob.jobAdd': 'Add card', 'ob.skip': 'Not now',
+  'card.live': 'Live tasks', 'desc.live': 'What the main agent and each worker are doing right now, step by step.',
+  'lv.none': 'Nothing is running right now.', 'lv.last': 'Last task', 'lv.worker': 'Worker {n}', 'lv.steps': P('en', { one: '{n} step', other: '{n} steps' }), 'lv.waiting': 'Waiting for workers', 'lv.thinking': 'Thinking',
+  'lv.stripL': 'Steps: {ok} ok, {failed} failed',
+  'lv.ofDone': 'Workers: {done} of {n} finished', 'lv.late': 'Longer than usual', 'lv.usual': 'Usual: {a} to {b} · sample: {n}',
+  'lv.t.terminal': 'Running a command', 'lv.t.execute_code': 'Running code', 'lv.t.read_file': 'Reading a file', 'lv.t.search_files': 'Searching files', 'lv.t.patch': 'Editing a file', 'lv.t.write_file': 'Writing a file', 'lv.t.web_search': 'Searching the web', 'lv.t.web_extract': 'Reading a web page', 'lv.t.browser': 'Using the browser', 'lv.t.delegate_task': 'Handing work to workers', 'lv.t.skill_view': 'Loading a skill', 'lv.t.vision_analyze': 'Looking at an image',
 }
 
 const ar = {
@@ -151,13 +156,18 @@ const ar = {
   'card.memory': 'ذاكرة الوكيل', 'desc.memory': 'مقدار امتلاء ملفي MEMORY.md وUSER.md مقابل حدّيهما، ومتى تغيّرا آخر مرة.', 'mem.agent': 'ملاحظات الوكيل', 'mem.user': 'معلومات عنك', 'mem.off': 'معطّلة', 'mem.empty': 'فارغة', 'mem.edited': 'عُدّلت {t}', 'mem.provider': 'المزوّد الخارجي',
   'mem.entries': P('ar-u-nu-latn', { zero: 'لا مدخلات', one: 'مدخل واحد', two: 'مدخلان', few: '{n} مدخلات', many: '{n} مدخلًا', other: '{n} مدخل' }),
   'card.job-result': 'نتيجة مهمة', 'desc.job-result': 'آخر نتيجة لمهمة مجدولة تختارها. أضف بطاقة لكل مهمة.', 'opt.job': 'المهمة المجدولة',
-  'jr.pick': 'اختر مهمة مجدولة', 'jr.pickD': 'تعرض هذه البطاقة آخر نتيجة للمهمة التي تختارها.', 'jr.choose': 'اختر المهمة', 'jr.none': 'لم تُشغَّل بعد.', 'jr.gone': 'هذه المهمة لم تعد موجودة.', 'jr.noJobs': 'ليس لديك مهام مجدولة بعد.',
-  'jr.more': 'إظهار المزيد', 'jr.less': 'إظهار أقل', 'jr.truncated': 'يُعرض أول 64 KB فقط.', 'jr.ranAt': 'شُغّلت {time}', 'jr.open': 'فتح المهام المجدولة',
+  'jr.pick': 'اختر مهمة مجدولة', 'jr.pickD': 'تعرض هذه البطاقة آخر نتيجة للمهمة التي تختارها.', 'jr.choose': 'اختر المهمة', 'jr.none': 'لم تُشغَّل بعد.', 'jr.silent': 'آخر تشغيل لم يُنتج مخرجات.', 'jr.gone': 'هذه المهمة لم تعد موجودة.', 'jr.noJobs': 'ليس لديك مهام مجدولة بعد.',
+  'jr.more': 'إظهار المزيد', 'jr.less': 'إظهار أقل', 'jr.truncated': 'يُعرض أول 64 KB فقط.', 'jr.ranAt': 'شُغّلت {time}', 'jr.open': 'فتح المهام المجدولة', 'jr.chat': 'ناقش', 'jr.chatL': 'ناقش {job} في محادثة جديدة',
   'card.logs': 'السجلات', 'desc.logs': 'آخر أسطر سجلات Hermes ملوّنة حسب المستوى.',
   'lg.file': 'ملف السجل', 'lg.agent': 'الوكيل', 'lg.errors': 'الأخطاء', 'lg.gateway': 'البوابة', 'lg.gui': 'الواجهة', 'lg.level': 'المستوى', 'lg.all': 'الكل', 'lg.warn': 'تحذيرات فأعلى', 'lg.err': 'أخطاء فأعلى',
   'lg.empty': 'لا توجد أسطر في السجل', 'lg.emptyLv': 'لا توجد أسطر بهذا المستوى', 'lg.noApi': 'إصدار Hermes هذا لا يتيح السجلات للإضافات.',
   'lg.lines': P('ar-u-nu-latn', { zero: 'لا أسطر', one: 'سطر واحد', two: 'سطران', few: '{n} أسطر', many: '{n} سطرًا', other: '{n} سطر' }),
   'gal.addAnother': 'إضافة بطاقة أخرى', 'ob.jobT': 'هل تريد إظهار نتيجة مهمة مجدولة هنا؟', 'ob.jobD': 'أضف بطاقة تعرض آخر نتيجة لمهمة. يمكنك إضافة المزيد من «البطاقات».', 'ob.jobAdd': 'إضافة بطاقة', 'ob.skip': 'ليس الآن',
+  'card.live': 'المهام الجارية', 'desc.live': 'ما يفعله الوكيل الرئيسي وكل عامل الآن، خطوة بخطوة.',
+  'lv.none': 'لا شيء يعمل الآن.', 'lv.last': 'آخر مهمة', 'lv.worker': 'عامل {n}', 'lv.steps': P('ar-u-nu-latn', { one: 'خطوة واحدة', two: 'خطوتان', few: '{n} خطوات', many: '{n} خطوة', other: '{n} خطوة' }), 'lv.waiting': 'ينتظر العمّال', 'lv.thinking': 'يفكّر',
+  'lv.stripL': 'الخطوات: {ok} ناجحة، {failed} فاشلة',
+  'lv.ofDone': 'العمّال: انتهى {done} من {n}', 'lv.late': 'أطول من المعتاد', 'lv.usual': 'المعتاد: من {a} إلى {b} · العيّنة: {n}',
+  'lv.t.terminal': 'يشغّل أمرًا', 'lv.t.execute_code': 'يشغّل كودًا', 'lv.t.read_file': 'يقرأ ملفًا', 'lv.t.search_files': 'يبحث في الملفات', 'lv.t.patch': 'يعدّل ملفًا', 'lv.t.write_file': 'يكتب ملفًا', 'lv.t.web_search': 'يبحث في الويب', 'lv.t.web_extract': 'يقرأ صفحة ويب', 'lv.t.browser': 'يستخدم المتصفح', 'lv.t.delegate_task': 'يوزّع العمل على العمّال', 'lv.t.skill_view': 'يحمّل مهارة', 'lv.t.vision_analyze': 'يفحص صورة',
 }
 
 // Flat dotted keys -> nested tree (the SDK splits keys on '.').

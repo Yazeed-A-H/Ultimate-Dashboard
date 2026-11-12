@@ -1,7 +1,7 @@
 {
   "name": "ultimate-dashboard",
   "private": true,
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Customizable dashboard page for Hermes Desktop and the Webapp.",
   "license": "MIT",
   "repository": {

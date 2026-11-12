@@ -1,5 +1,6 @@
 """Backend tests: temp HERMES_HOME with a minimal state.db; runs without Hermes installed."""
 import asyncio
+import contextlib
 import importlib.util
 import json
 import os
@@ -48,7 +49,7 @@ def hermes_utils_stub():
 
 
 def load(home: Path, utils_stub=None):
-    sys.modules["hermes_constants"] = types.SimpleNamespace(get_hermes_home=lambda: home)
+    sys.modules["hermes_constants"] = types.SimpleNamespace(get_hermes_home=lambda: home, get_hermes_dir=lambda new, old, *, home=home: home / new)
     for m in ("plugins.plugin_storage", "utils"):
         sys.modules.pop(m, None)
     if utils_stub:
@@ -516,6 +517,378 @@ class ApiTest(unittest.TestCase):
 
     def test_health(self):
         self.assertTrue(run(self.api.health())["ok"])
+
+
+HEADER = ("=== Hermes subagent live transcript ===\ndelegation: deleg_aabbccdd   task: 0\ngoal: Read the repo\nstarted: {st}\n"
+          "(append-only; streams while the subagent runs — tail -f me)\n" + "=" * 40 + "\n")
+
+
+class LiveTest(unittest.TestCase):
+    """GET /live: worker logs shaped like tools/delegation_live_log.py writes them, and Main chats in a state.db with the real messages columns."""
+    FMT = "%Y-%m-%d %H:%M:%S"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        self.root = self.home / "cache" / "delegation" / "live"
+        self.root.mkdir(parents=True)
+        self.now = time.time()
+        self.db = sqlite3.connect(self.home / "state.db")
+        self.db.executescript("""
+          CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, source TEXT, parent_session_id TEXT, started_at REAL);
+          CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, timestamp REAL, tool_call_id TEXT, tool_calls TEXT, tool_name TEXT, active INT DEFAULT 1);
+          INSERT INTO sessions VALUES ('s1', 'Plan the release', 'desktop', NULL, 1), ('t1', 'T', 'tool', NULL, 1);
+        """)
+        self.api = load(self.home)
+
+    def tearDown(self):
+        self.db.close()
+        self.tmp.cleanup()
+
+    def stamp(self, age=60):
+        return datetime.fromtimestamp(self.now - age).strftime(self.FMT)
+
+    def folder(self, name="deleg_aabbccdd", age=60, goals=("Read the repo",), completed=None, logs=None, log_age=5, model="m1", raw_manifest=None):
+        d = self.root / name
+        d.mkdir()
+        mf = {"delegation_id": name, "started": self.stamp(age), "task_count": len(goals), "model": model, "provider": None,
+              "tasks": [{"index": i, "goal": g, "log": None, "status": "running"} for i, g in enumerate(goals)]}
+        if completed is not None:
+            mf["completed"] = self.stamp(completed)
+        (d / "manifest.json").write_text(raw_manifest if raw_manifest is not None else json.dumps(mf, ensure_ascii=False), "utf-8")
+        for i, text in (logs or {}).items():
+            (d / f"task-{i}.log").write_bytes((HEADER.format(st=self.stamp(age)) + text).encode())
+            os.utime(d / f"task-{i}.log", (self.now - log_age, self.now - log_age))
+        return d
+
+    def at(self, age):  # HH:MM:SS as Hermes writes it
+        return datetime.fromtimestamp(self.now - age).strftime("%H:%M:%S")
+
+    def lines(self, *rows):  # (age, role, text)
+        return "".join(f"{self.at(a)} {r:<9}| {t}\n" for a, r, t in rows)
+
+    def test_log_steps_last_now_and_privacy(self):
+        log = self.lines((50, "user", "kickoff: SECRET-KICKOFF"), (50, "start", "SECRET-START"), (45, "tool", "-> terminal(git status -sb)"),
+                         (44, "result", "terminal ok 1.2s: SECRET-RESULT"), (43, "think", "SECRET-THINK"), (42, "assistant", "SECRET-ASSISTANT"),
+                         (40, "tool", "-> read_file(/tmp/a.py)"), (39, "result", "read_file ERROR 0.3s: SECRET-ERROR"), (38, "weird", "SECRET-UNKNOWN"),
+                         (30, "tool", "-> search_files(بحث عن ملف)"), (29, "result", "search_files ok: نتيجة"),
+                         (20, "tool", "-> terminal(echo مرحبا)")) + f"{self.at(10)} tool     | -> read_f"  # cut mid-write, no newline
+        self.folder(logs={0: log})
+        out = self.api.live()
+        self.assertTrue(out["available"] and out["running"])
+        (g,), (k,) = out["groups"], out["groups"][0]["tasks"]
+        self.assertTrue(g["running"])
+        self.assertEqual((k["index"], k["goal"], k["model"], k["status"], k["ended"], k["steps"], k["truncated"]), (0, "Read the repo", "m1", "running", None, 4, False))
+        self.assertEqual([(x["tool"], x["ok"], x["secs"]) for x in k["last"]], [("terminal", True, 1.2), ("read_file", False, 0.3), ("search_files", True, 1.0)])  # no `1.2s` on the last: result time minus tool time
+        for x, age in zip(k["last"], (45, 40, 30)):
+            self.assertAlmostEqual(x["at"], self.now - age, delta=1)  # `at` is the START of the step (its tool line)
+        self.assertEqual((k["now"]["tool"], k["now"]["text"]), ("terminal", "echo مرحبا"))  # the redacted preview of the running step is the only text shown
+        self.assertAlmostEqual(k["now"]["at"], self.now - 20, delta=1)
+        self.assertEqual(k["started"], g["started"])
+        self.assertAlmostEqual(g["started"], self.now - 60, delta=1)
+        raw = json.dumps(out, ensure_ascii=False)
+        for word in ("SECRET", "kickoff", "نتيجة"):
+            self.assertNotIn(word, raw)
+
+    def test_final_line_gives_status_and_never_the_summary(self):
+        log = self.lines((30, "tool", "-> terminal(ls)"), (29, "result", "terminal ok 0.1s: x"), (5, "final", "status=completed duration=25.0s summary: SECRET-SUMMARY"),
+                         (4, "final", "end status=completed"))
+        self.folder(logs={0: log})
+        k = self.api.live()["groups"][0]["tasks"][0]
+        self.assertEqual((k["status"], k["now"], k["steps"]), ("completed", None, 1))
+        self.assertAlmostEqual(k["ended"], self.now - 4, delta=1)
+        self.assertNotIn("SECRET", json.dumps(self.api.live()))
+        self.assertEqual(self.api.live()["groups"][0]["running"], True)  # no manifest `completed` yet: the batch still runs
+
+    def test_parallel_calls_finish_in_any_order(self):
+        self.folder(logs={0: self.lines((9, "tool", "-> terminal(a)"), (8, "tool", "-> read_file(b)"), (7, "result", "terminal ok 0.5s: x"))})
+        k = self.api.live()["groups"][0]["tasks"][0]
+        self.assertEqual((k["now"]["tool"], k["steps"], len(k["last"])), ("read_file", 2, 1))
+
+    def test_parallel_calls_of_one_tool_pair_first_in_first_out(self):
+        self.folder(logs={0: self.lines((20, "tool", "-> terminal(a)"), (19, "tool", "-> terminal(b)"), (18, "result", "terminal ok 1.0s: x"), (15, "result", "terminal ERROR 2.0s: x"))})
+        k = self.api.live()["groups"][0]["tasks"][0]
+        self.assertEqual([(x["ok"], x["secs"]) for x in k["last"]], [(True, 1.0), (False, 2.0)])
+        self.assertAlmostEqual(k["last"][0]["at"], self.now - 20, delta=1)
+        self.assertAlmostEqual(k["last"][1]["at"], self.now - 19, delta=1)
+        self.assertEqual((k["now"], k["steps"]), (None, 2))
+
+    def test_last_keeps_the_newest_400_steps_oldest_first(self):
+        self.folder(logs={0: "".join(f"12:00:00 tool     | -> terminal({i})\n12:00:00 result   | terminal ok {i}.0s: x\n" for i in range(450))})
+        k = self.api.live()["groups"][0]["tasks"][0]
+        self.assertEqual((len(k["last"]), k["steps"], k["last"][0]["secs"], k["last"][-1]["secs"]), (400, 450, 50.0, 449.0))
+
+
+    def test_midnight_wrap_adds_a_day(self):
+        d = self.folder(logs={0: "23:59:55 tool     | -> terminal(a)\n23:59:58 result   | terminal ok 1.0s: x\n00:00:05 tool     | -> terminal(b)\n00:00:07 result   | terminal ok 2.0s: x\n"})
+        mf = json.loads((d / "manifest.json").read_text())
+        mf["started"] = "2026-11-10 23:59:50"
+        (d / "manifest.json").write_text(json.dumps(mf))
+        k = self.api.live()["groups"][0]["tasks"][0]
+        a, b = (x["at"] for x in k["last"])
+        self.assertEqual(b - a, 10)
+        self.assertEqual(datetime.fromtimestamp(a).strftime(self.FMT), "2026-11-10 23:59:55")
+        self.assertEqual(datetime.fromtimestamp(b).strftime(self.FMT), "2026-11-11 00:00:05")
+
+    def test_big_log_is_read_from_the_end(self):
+        row = "12:00:00 tool     | -> terminal(" + "x" * 50 + ")\n"
+        n = self.api.MAX_LIVE_LOG_BYTES // len(row) + 3000
+        self.folder(logs={0: row * n})
+        k = self.api.live()["groups"][0]["tasks"][0]
+        self.assertTrue(k["truncated"])
+        self.assertTrue(self.api.MAX_LIVE_LOG_BYTES // len(row) - 2 <= k["steps"] <= self.api.MAX_LIVE_LOG_BYTES // len(row) + 1, k["steps"])
+        self.assertEqual(k["now"]["text"], "x" * 50)  # the partial first line was dropped, so no half-line is read as a step
+
+    def test_bad_folders_and_manifests_are_skipped(self):
+        for bad in ("deleg_zzzzzzzz", "deleg_aabbccd", "deleg_aabbccdd-x", "other", "deleg_AABBCCDD"):
+            self.folder(bad, logs={0: self.lines((5, "tool", "-> terminal(x)"))})
+        self.folder("deleg_00000001", raw_manifest="{not json", logs={0: ""})
+        self.folder("deleg_00000002", raw_manifest=json.dumps({"started": self.stamp(), "tasks": [], "pad": "x" * 70000}), logs={0: ""})  # over the 64 KB read cap: cut JSON
+        self.folder("deleg_00000003", raw_manifest="[1]")
+        self.folder("deleg_00000004", raw_manifest=json.dumps({"started": "yesterday", "tasks": []}))
+        self.folder("deleg_00000005-2", logs={0: self.lines((5, "tool", "-> terminal(x)"))})  # a retried id is allowed
+        (self.root / "deleg_00000006").write_text("a file, not a folder")
+        self.assertEqual([g["id"] for g in self.api.live()["groups"]], ["deleg_00000005-2"])
+
+    def test_symlinked_folder_and_log_are_skipped(self):
+        out = self.home / "elsewhere"
+        out.mkdir()
+        (out / "manifest.json").write_text(json.dumps({"started": self.stamp(), "tasks": [{"index": 0, "goal": "SECRET-GOAL"}]}))
+        (self.root / "deleg_11111111").symlink_to(out, target_is_directory=True)
+        d = self.folder(logs={})
+        secret = self.home / "secret.log"
+        secret.write_text(self.lines((5, "tool", "-> terminal(SECRET-TOOL)")))
+        (d / "task-0.log").symlink_to(secret)
+        res = self.api.live()
+        self.assertEqual([g["id"] for g in res["groups"]], ["deleg_aabbccdd"])
+        k = res["groups"][0]["tasks"][0]
+        self.assertEqual((k["steps"], k["now"]), (0, None))
+        self.assertFalse(res["groups"][0]["running"])  # no readable log, so no sign of life
+        self.assertNotIn("SECRET", json.dumps(res))
+
+    def test_symlinked_manifest_is_skipped(self):
+        out = self.home / "elsewhere"
+        out.mkdir()
+        (out / "manifest.json").write_text(json.dumps({"started": self.stamp(), "tasks": [{"index": 0, "goal": "SECRET-GOAL"}]}))
+        d = self.folder(logs={})
+        (d / "manifest.json").unlink()
+        (d / "manifest.json").symlink_to(out / "manifest.json")
+        self.assertEqual(self.api.live()["groups"], [])
+        self.assertNotIn("SECRET", json.dumps(self.api.live()))
+
+    def test_finished_batches_stay_30_minutes(self):
+        self.folder("deleg_00000001", age=3600, completed=29 * 60, logs={0: self.lines((29 * 60 + 5, "tool", "-> terminal(a)"))}, log_age=29 * 60)
+        self.folder("deleg_00000002", age=3600, completed=31 * 60, logs={0: ""}, log_age=31 * 60)
+        res = self.api.live()
+        self.assertEqual([g["id"] for g in res["groups"]], ["deleg_00000001"])
+        g = res["groups"][0]
+        self.assertEqual((g["running"], g["tasks"][0]["status"], res["running"]), (False, "stalled", False))  # manifest task status is still "running": it never finished
+        self.assertAlmostEqual(g["completed"], self.now - 29 * 60, delta=1)
+        self.assertAlmostEqual(g["tasks"][0]["ended"], g["completed"], delta=1)
+
+    def test_manifest_status_is_used_once_the_batch_completed(self):
+        d = self.folder(age=600, completed=60, logs={0: self.lines((300, "tool", "-> terminal(a)"))}, log_age=60)
+        mf = json.loads((d / "manifest.json").read_text())
+        mf["tasks"][0]["status"] = "interrupted"
+        (d / "manifest.json").write_text(json.dumps(mf))
+        self.assertEqual(self.api.live()["groups"][0]["tasks"][0]["status"], "interrupted")
+
+    def test_quiet_logs_make_a_batch_stalled_then_history(self):
+        self.folder("deleg_00000001", age=3000, logs={0: self.lines((1200, "tool", "-> terminal(a)"))}, log_age=20 * 60)  # 20 min quiet: stalled
+        self.folder("deleg_00000002", age=9000, logs={0: self.lines((3000, "tool", "-> terminal(a)"))}, log_age=50 * 60)  # 50 min quiet: left behind by a crash, history
+        res = self.api.live()
+        self.assertEqual([g["id"] for g in res["groups"]], ["deleg_00000001"])
+        k = res["groups"][0]["tasks"][0]
+        self.assertEqual((res["groups"][0]["running"], k["status"], k["now"], res["running"]), (False, "stalled", None, False))
+        self.assertEqual(k["steps"], 1)
+
+    def test_groups_newest_first_capped(self):
+        for i in range(10):
+            self.folder(f"deleg_0000000{i}", age=100 + i, goals=[f"g{j}" for j in range(12)], logs={0: self.lines((5, "tool", "-> terminal(a)"))})
+        res = self.api.live()
+        self.assertEqual([g["id"] for g in res["groups"]], [f"deleg_0000000{i}" for i in range(8)])
+        self.assertEqual(len(res["groups"][0]["tasks"]), 10)
+
+    def sub(self, sid, title, parent="s1", age=60):
+        self.db.execute("INSERT INTO sessions VALUES (?,?,?,?,?)", (sid, title, "subagent", parent, self.now - age))
+        self.db.commit()
+
+    def test_parent_is_found_by_start_and_title_prefix(self):
+        goal = "In /home/u/project, do the thing\n  with   care and more words after"
+        self.folder(goals=[goal])
+        self.sub("w1", "Subagent: In /home/u/project, do the thing with… #2", age=62)
+        self.assertEqual(self.api.live()["groups"][0]["parent"], "s1")
+        self.assertEqual([m["id"] for m in self.api.live()["mains"]], ["s1"])
+
+    def test_parent_of_two_similar_chats_is_the_closest_start(self):
+        goal = "Summarise the repository structure and the tests"
+        self.folder("deleg_aaaaaaaa", age=60, goals=[goal])
+        self.folder("deleg_bbbbbbbb", age=57, goals=[goal])
+        self.sub("wa", "Subagent: Summarise the repository structure…", parent="sA", age=60)
+        self.sub("wb", "Subagent: Summarise the repository structure…", parent="sB", age=57)
+        by = {g["id"]: g["parent"] for g in self.api.live()["groups"]}
+        self.assertEqual(by, {"deleg_aaaaaaaa": "sA", "deleg_bbbbbbbb": "sB"})
+
+    def test_parent_matched_by_most_tasks_wins(self):
+        self.folder(goals=["Read the repo", "Check the build"])
+        self.sub("w1", "Subagent: Read the repo", parent="sB", age=60)  # B matches one task, exactly at the start
+        self.sub("w2", "Subagent: Read the repo", parent="sA", age=58)
+        self.sub("w3", "Subagent: Check the build", parent="sA", age=58)
+        self.assertEqual(self.api.live()["groups"][0]["parent"], "sA")
+
+    def test_untitled_subagent_rows_resolve_the_parent(self):
+        self.folder(goals=["Read the repo", "Check the build"])
+        self.sub("w1", None, parent="sA")
+        self.sub("w2", "", parent="sA", age=59)
+        self.assertEqual(self.api.live()["groups"][0]["parent"], "sA")
+
+    def test_titled_match_beats_untitled_rows_of_another_parent(self):
+        self.folder(goals=["Read the repo"])
+        self.sub("w1", "Subagent: Read the repo", parent="sA", age=58)
+        self.sub("w2", None, parent="sB")
+        self.sub("w3", None, parent="sB")
+        self.assertEqual(self.api.live()["groups"][0]["parent"], "sA")
+
+    def test_untitled_rows_of_two_parents_resolve_each_folder_to_the_closer(self):
+        self.folder("deleg_aaaaaaaa", age=60, goals=["Read the repo"])
+        self.folder("deleg_bbbbbbbb", age=57, goals=["Read the repo"])
+        self.sub("wa", None, parent="sA", age=60)
+        self.sub("wb", None, parent="sB", age=57)
+        by = {g["id"]: g["parent"] for g in self.api.live()["groups"]}
+        self.assertEqual(by, {"deleg_aaaaaaaa": "sA", "deleg_bbbbbbbb": "sB"})
+
+    def worker(self, sid, parent, goal, age=60):  # an untitled Worker of a one-shot chat: its first message carries the goal after a CONTEXT block
+        self.sub(sid, None, parent=parent, age=age)
+        self.msg(sid, "user", age, content=f"CONTEXT: a long\n  background...\n\nTASK:\n{goal}\n")
+
+    def test_title_cut_from_the_context_block_is_matched_by_the_goal_text(self):
+        self.folder("deleg_aaaaaaaa", age=60, goals=["Read the repository layout"])
+        self.sub("wa", "Subagent: CONTEXT: #2", parent="sA", age=60)
+        self.msg("wa", "user", 60, content="CONTEXT: a long\n  background...\n\nTASK:\nRead the repository layout\n")
+        self.sub("wx", "Subagent: CONTEXT:", parent="sX", age=60)  # another chat's Worker: its message holds another goal
+        self.msg("wx", "user", 60, content="CONTEXT: other\n\nTASK:\nCheck the build output\n")
+        self.assertEqual(self.api.live()["groups"][0]["parent"], "sA")
+
+    def test_untitled_rows_started_together_are_told_apart_by_the_goal_text(self):
+        self.folder("deleg_aaaaaaaa", age=60, goals=["Read the repository layout"])
+        self.folder("deleg_bbbbbbbb", age=60, goals=["Check the build output"])
+        self.worker("wb", "sB", "Check the  build output")  # inserted first: a time-only vote would give it to both
+        self.worker("wa", "sA", "Read the repository layout")
+        by = {g["id"]: g["parent"] for g in self.api.live()["groups"]}
+        self.assertEqual(by, {"deleg_aaaaaaaa": "sA", "deleg_bbbbbbbb": "sB"})
+
+    def test_untitled_rows_of_folders_with_two_and_three_tasks(self):
+        ga, gb = ["Read the repository layout", "Run the unit tests"], ["Check the build output", "Lint the sources", "Summarise the changelog"]
+        self.folder("deleg_aaaaaaaa", age=60, goals=ga)
+        self.folder("deleg_bbbbbbbb", age=60, goals=gb)
+        for i, g in enumerate(gb):
+            self.worker(f"wb{i}", "sB", g, age=60 - i % 2)
+        for i, g in enumerate(ga):
+            self.worker(f"wa{i}", "sA", g, age=60 - i % 2)
+        by = {g["id"]: g["parent"] for g in self.api.live()["groups"]}
+        self.assertEqual(by, {"deleg_aaaaaaaa": "sA", "deleg_bbbbbbbb": "sB"})
+
+    def test_untitled_row_without_a_goal_in_its_message_keeps_the_vote_fallback(self):
+        self.folder(goals=["Read the repository layout"])
+        self.worker("w1", "sA", "something else entirely")
+        self.sub("w2", None, parent="sB", age=59)  # no message row at all
+        self.assertEqual(self.api.live()["groups"][0]["parent"], "sA")  # closest start
+
+    def test_goal_text_is_compared_but_never_returned(self):
+        self.folder(goals=["Read the repository layout"])
+        self.worker("w1", "sA", "Read the repository layout")
+        self.assertEqual(self.api.live()["groups"][0]["parent"], "sA")
+        self.assertNotIn("background", json.dumps(self.api.live()))
+
+    def test_untitled_row_without_a_messages_table_does_not_raise(self):
+        self.folder(goals=["Read the repository layout"])
+        self.sub("w1", None, parent="sA")
+        self.db.execute("ALTER TABLE messages RENAME TO messages_gone"); self.db.commit()
+        with contextlib.closing(self.api._db()) as conn:  # live() itself needs messages further on; this checks the parent lookup alone
+            self.assertEqual(self.api._live_parent(conn, self.now - 60, ["Read the repository layout"]), "sA")
+
+    def test_parent_none_when_title_or_time_differ(self):
+        self.folder(goals=["Read the repo"])
+        self.sub("w1", "Subagent: Something else entirely…")
+        self.sub("w2", "Subagent: Read the repo", age=20)  # 40 s from the start
+        self.sub("w3", None, age=20)  # untitled rows count only inside the window
+        res = self.api.live()
+        self.assertEqual((res["groups"][0]["parent"], res["mains"]), (None, []))
+
+    def tool(self, sid, name, content, age, call="c"):
+        self.db.execute("INSERT INTO messages (session_id, role, content, timestamp, tool_call_id, tool_name) VALUES (?, 'tool', ?, ?, ?, ?)", (sid, json.dumps(content), self.now - age, call, name))
+        self.db.commit()
+
+    def msg(self, sid, role, age, tool_calls=None, content="SECRET-CONTENT"):
+        self.db.execute("INSERT INTO messages (session_id, role, content, timestamp, tool_calls) VALUES (?,?,?,?,?)", (sid, role, content, self.now - age, json.dumps(tool_calls) if tool_calls else None))
+        self.db.commit()
+
+    def test_mains_steps_last_and_pending_tool_calls(self):
+        self.msg("s1", "user", 300)
+        self.tool("s1", "terminal", {"exit_code": 0, "output": "SECRET-OUT"}, 200, "a")
+        self.msg("s1", "user", 100)
+        for i in range(14):
+            self.tool("s1", "read_file" if i % 2 else "terminal", {"exit_code": 1 if i == 12 else 0, "error": None}, 90 - i, f"r{i}")
+        self.msg("s1", "assistant", 5, [{"id": "p1", "call_id": "p1", "type": "function", "function": {"name": "terminal", "arguments": "{\"command\": \"SECRET-ARG\"}"}},
+                                        {"id": "p2", "call_id": "p2", "type": "function", "function": {"name": "delegate_task", "arguments": "{\"goal\": \"SECRET-GOAL\"}"}}])
+        self.tool("s1", "terminal", {"exit_code": 0}, 3, "p1")  # p1 already has its row, p2 is still running
+        self.tool("t1", "terminal", {"exit_code": 0}, 3, "x")  # tool sessions never count
+        res = self.api.live()
+        (m,) = res["mains"]
+        self.assertEqual((m["id"], m["title"], m["source"]), ("s1", "Plan the release", "desktop"))
+        self.assertEqual(m["steps"], 15)  # tool rows after the newest user row
+        self.assertEqual(len(m["last"]), 15)  # only this turn: r0..r13 and p1, not the tool row before the second user row
+        self.assertEqual([x["ok"] for x in m["last"]], [True] * 12 + [False, True, True])  # r12 (a terminal call, exit_code 1) failed
+        self.assertEqual(m["last"][-1]["tool"], "terminal")
+        self.assertAlmostEqual(m["turn_at"], self.now - 100, delta=1)
+        # `at` = when the row before it was written (the user row, a result, the assistant row), `secs` = the gap to the tool row
+        for x, (at, secs) in zip((m["last"][0], m["last"][1], m["last"][-1]), ((100, 10), (90, 1), (5, 2))):
+            self.assertAlmostEqual(x["at"], self.now - at, delta=1)
+            self.assertAlmostEqual(x["secs"], secs, delta=1)
+        self.assertEqual(m["now"]["tools"], ["delegate_task"])
+        self.assertAlmostEqual(m["now"]["at"], self.now - 5, delta=1)  # the assistant row that made the calls
+        self.assertAlmostEqual(m["last_at"], self.now - 3, delta=1)
+        self.assertTrue(res["running"])
+        self.assertNotIn("SECRET", json.dumps(res))
+
+    def test_mains_without_a_user_row_have_no_turn_and_the_first_step_starts_at_itself(self):
+        self.tool("s1", "terminal", {"exit_code": 0}, 30, "a")
+        (m,) = self.api.live()["mains"]
+        self.assertEqual((m["turn_at"], m["now"], m["steps"], m["last"][0]["secs"]), (None, None, 1, 0.0))
+        self.assertAlmostEqual(m["last"][0]["at"], self.now - 30, delta=1)
+
+    def test_mains_last_is_capped_at_400(self):
+        self.msg("s1", "user", 900)
+        for i in range(405):
+            self.tool("s1", "terminal", {"exit_code": 0}, 800 - i, f"c{i}")
+        (m,) = self.api.live()["mains"]
+        self.assertEqual((m["steps"], len(m["last"])), (405, 400))
+        self.assertAlmostEqual(m["last"][-1]["at"], self.now - (800 - 403), delta=1)
+
+    def test_mains_pending_calls_expire_and_quiet_chats_drop_out(self):
+        self.msg("s1", "assistant", 20 * 60, [{"id": "p1", "type": "function", "function": {"name": "terminal", "arguments": "{}"}}])
+        self.tool("s1", "terminal", {"exit_code": 0}, 120, "z")
+        self.tool("old", "terminal", {"exit_code": 0}, 11 * 60, "z")
+        self.db.execute("INSERT INTO sessions VALUES ('old', 'Old', 'desktop', NULL, 1)")
+        self.db.commit()
+        res = self.api.live()
+        self.assertEqual([(m["id"], m["now"]) for m in res["mains"]], [("s1", None)])  # a call older than 15 min is not "now"
+        self.assertFalse(res["running"])
+
+    def test_missing_live_folder_is_an_empty_answer(self):
+        self.root.rmdir()
+        res = self.api.live()
+        self.assertEqual({k: v for k, v in res.items() if k != "at"}, {"available": True, "running": False, "groups": [], "mains": []})
+        self.assertAlmostEqual(res["at"], time.time(), delta=5)
+
+    def test_no_db_is_unavailable_and_nothing_is_written(self):
+        d = self.folder(logs={0: self.lines((5, "tool", "-> terminal(a)"))})
+        before = [(p.name, p.stat().st_mtime_ns) for p in sorted(d.iterdir())] + [(self.home / "state.db").stat().st_mtime_ns]
+        self.api.live()
+        self.assertEqual([(p.name, p.stat().st_mtime_ns) for p in sorted(d.iterdir())] + [(self.home / "state.db").stat().st_mtime_ns], before)
+        self.db.close()
+        (self.home / "state.db").unlink()
+        self.assertEqual(self.api.live()["available"], False)
 
 
 if __name__ == "__main__":

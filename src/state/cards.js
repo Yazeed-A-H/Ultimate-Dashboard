@@ -26,7 +26,8 @@ const DEFS = [
   ['memory', 'database', ['m', 'l'], 'm', []],
   ['skills', 'library', ['m', 'l', 'xl'], 'l', [fields('recent', 'added', 'unused')]],
   ['spend', 'credit-card', ['m', 'l', 'xl'], 'm', [RANGE]],
-  ['activity', 'history', ['m', 'l', 'xl'], 'l', [RANGE]]
+  ['activity', 'history', ['m', 'l', 'xl'], 'l', [RANGE]],
+  ['live', 'broadcast', ['l', 'xl'], 'l', []]
 ]
 // Cards the user can add many times. A stored instance id is `<base>~<6 chars [a-z0-9]>`; the bare base id is the TYPE and is never stored.
 const MULTI = new Set(['job-result'])

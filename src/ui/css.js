@@ -47,7 +47,10 @@ export const CSS = `
 .ht-spin { animation: ht-spin 1s linear infinite; }
 .ht-rf[aria-busy='true'] { opacity: 0.6; cursor: default; }
 @keyframes ht-spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .ht-spin { animation: none; } .ht * { transition: none !important; } }
+/* live tasks: the one motion of the dashboard, a fade (no movement) on the running dot and the current step; static under reduced motion */
+.ht-lv-r[data-state='running'] .ht-dot, .ht-lv-f[data-none] { animation: ht-pulse 1.6s ease-in-out infinite; }
+@keyframes ht-pulse { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .ht-spin { animation: none; } .ht-lv-r[data-state='running'] .ht-dot, .ht-lv-f[data-none] { animation: none; } .ht * { transition: none !important; } }
 
 /* header */
 .ht-hero { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 0.75rem 1.5rem; margin-block-end: 1rem; }
@@ -158,8 +161,10 @@ export const CSS = `
 .ht-jr-md[data-open] { max-block-size: none; }
 .ht-jr-md table { display: block; overflow-x: auto; max-inline-size: 100%; }
 .ht-jr-md pre { overflow-x: auto; }
+.ht-jr-md a { color: var(--ht-accent); text-decoration: underline; }
 .ht-jr-more { margin: 0.5rem 1rem; }
 .ht-jr > .ht-state-d { padding: 0 1rem; }
+.ht-jr-d { margin: 0; padding: 0.5rem 1rem 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 0.75rem; line-height: 1rem; color: var(--ht-text-2); }
 .ht-tag[data-tone='accent'] { box-shadow: none; background: color-mix(in srgb, var(--ht-accent) 12%, transparent); color: var(--ht-text); }
 .ht-ap-act { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.375rem; }
 .ht-ap-cmd { font-family: var(--ht-mono); font-size: 0.75rem; overflow-wrap: anywhere; }
@@ -204,6 +209,29 @@ export const CSS = `
 .ht-sep-d { color: var(--ht-text-3); }
 .ht-f-i { display: grid; place-items: center; flex: none; inline-size: 1.75rem; block-size: 1.75rem; border-radius: 4px; background: var(--ht-fill-2); color: var(--ht-text-2); }
 .ht-f-r { display: flex; align-items: center; gap: 0.75rem; }
+
+/* live tasks: a section is one Main chat and its Workers; a lane is a row of three columns (who | track | time) and every track shares the section's time axis */
+.ht-lv-s { display: grid; grid-template-columns: minmax(7rem, 11.5rem) minmax(0, 1fr) auto; column-gap: 0.75rem; row-gap: 0.625rem; align-items: center; padding: 0.75rem 1rem 0.625rem; }
+.ht-lv-s + .ht-lv-s { border-block-start: 1px solid var(--ht-line-3); }
+.ht-lv-l, .ht-lv-li, .ht-lv-r { display: grid; grid-template-columns: subgrid; grid-column: 1 / -1; align-items: center; min-inline-size: 0; }
+.ht-lv-l { row-gap: 0.625rem; margin: 0; padding: 0; }
+.ht-lv-r { row-gap: 0.25rem; padding: 0; font: inherit; color: inherit; text-align: start; background: transparent; border: 0; }
+button.ht-lv-r { cursor: pointer; }
+button.ht-lv-r:hover { background: var(--ht-hover); }
+.ht-lv-who { display: flex; align-items: flex-start; gap: 0.5rem; min-inline-size: 0; }
+.ht-lv-r[data-w] .ht-lv-who { padding-inline-start: 0.875rem; }
+.ht-lv-who > .ht-st { margin-block-start: 0.375rem; }
+.ht-lv-n { flex: 1; min-inline-size: 0; }
+.ht-lv-t, .ht-lv-m, .ht-lv-of { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ht-lv-t { font-weight: 500; }
+.ht-lv-m, .ht-lv-tm, .ht-lv-of { font-size: 0.75rem; line-height: 1rem; color: var(--ht-text-2); }
+.ht-lv-tm { font-variant-numeric: tabular-nums; white-space: nowrap; text-align: end; }
+.ht-lv-bar { display: block; block-size: 0.375rem; border-radius: 0.1875rem; overflow: hidden; background: color-mix(in srgb, currentColor 12%, transparent); }
+.ht-lv-f { display: block; block-size: 100%; border-radius: inherit; background: var(--ht-accent); transition: inline-size 0.6s ease-out; }
+.ht-lv-r[data-state='done'] .ht-lv-f { background: var(--ht-ok); }
+.ht-lv-r[data-state='failed'] .ht-lv-f { background: var(--ht-bad); }
+.ht-lv-f[data-late] { background: color-mix(in srgb, currentColor 45%, transparent); }
+.ht-lv-f[data-none] { background: color-mix(in srgb, var(--ht-accent) 35%, transparent); }
 
 /* tables */
 .ht-tw { overflow-x: auto; }
@@ -328,6 +356,10 @@ button.ht-ctl, .ht-ctl .ht-sv { text-align: start; }
   .ht-rows[data-cols='2'] > li:nth-child(2) { border-block-start: 1px solid var(--ht-line-3); }
   .ht-rows[data-cols='2'] > li:nth-child(odd) { border-inline-end: 0; }
   .ht-row { grid-template-columns: minmax(0, 1fr); gap: 0.5rem; }
+  .ht-lv-s { grid-template-columns: minmax(0, 1fr) auto; }
+  .ht-lv-bar, .ht-lv-of { grid-column: 1 / -1; grid-row: 2; }
+  .ht-lv-of:empty { display: none; }
+  .ht-lv-tm { grid-column: 2; grid-row: 1; align-self: start; margin-block-start: 0.125rem; }
   .ht-ap-act { justify-content: flex-start; }
   .ht-rw { grid-template-areas: 't t' 'm time'; align-items: center; }
   .ht-vtab, .ht-ql-b, .ht-row-link, .ht-grip { min-block-size: 2.75rem; }
@@ -354,7 +386,7 @@ button.ht-ctl, .ht-ctl .ht-sv { text-align: start; }
 }
 /* Arabic needs about 1px more than Latin at small sizes */
 [dir='rtl'] :is(.ht-count, .ht-warnb, .ht-tag, .ht-list-pick small) { font-size: 0.75rem; }
-[dir='rtl'] :is(.ht-date, .ht-rng button, .ht-ql-t, .ht-ql-s, .ht-card-r, .ht-card-f, .ht-state-d, .ht-empty, .ht-rw-time, .ht-rw-m, .ht-more, .ht-link, .ht-us-l, .ht-kv-r dt, .ht-tile-l, .ht-sub-t, .ht-dt thead th, .ht-editbar-hint, .ht-gal-d, .ht-banner, .ht-adv > summary, .ht-fld, .ht-set-d, .ht-sc-m, .ht-keyf-e, .ht-kbd) { font-size: 0.8125rem; }
+[dir='rtl'] :is(.ht-date, .ht-rng button, .ht-ql-t, .ht-ql-s, .ht-card-r, .ht-card-f, .ht-state-d, .ht-jr-d, .ht-empty, .ht-rw-time, .ht-rw-m, .ht-lv-m, .ht-lv-tm, .ht-lv-of, .ht-more, .ht-link, .ht-us-l, .ht-kv-r dt, .ht-tile-l, .ht-sub-t, .ht-dt thead th, .ht-editbar-hint, .ht-gal-d, .ht-banner, .ht-adv > summary, .ht-fld, .ht-set-d, .ht-sc-m, .ht-keyf-e, .ht-kbd) { font-size: 0.8125rem; }
 /* uppercase and tracking do not exist in Arabic (tracking also breaks the joins) */
 [dir='rtl'] .ht-sub-t { letter-spacing: 0; text-transform: none; }
 `

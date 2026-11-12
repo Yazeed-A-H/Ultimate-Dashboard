@@ -7,8 +7,11 @@ import { bytesText, CRON_STATUSES, isFailed, isInternalJob, isOff, platformName,
 import { upcomingRuns } from '../state/cronweek.js'
 import { mcpState, mcpSummary, platformState } from '../state/services.js'
 import { evaluateHealth } from '../state/health.js'
-import { LOG_FILES } from '../state/logs.js'
-import { qk, useActive, useActivity, useApprovals, useCron, useDelegation, useFiles, useHealth, useJobOutput, useLogs, useMachine, machineHistory, useMcp, useMemory, useRecentSessions, useSpend, useSkills, useSkillsUsage, useRefresh, useStatus, useUsage, useWorkers } from './data.js'
+import { LOG_FILES, maskSecrets } from '../state/logs.js'
+import { liveView, toolKey } from '../state/live.js'
+import { jobAnswer, webUrl } from '../state/jobanswer.js'
+import { launch } from './quick.js'
+import { qk, useActive, useActivity, useApprovals, useCron, useDelegation, useFiles, useHealth, useJobOutput, useLive, useLogs, useMachine, machineHistory, useMcp, useMemory, useRecentSessions, useSpend, useSkills, useSkillsUsage, useRefresh, useStatus, useUsage, useWorkerHistory, useWorkers } from './data.js'
 import { byDate, GROUPS, skillCounts, unusedSkills } from '../state/skills.js'
 import { compact, costLabel, money } from '../state/spend.js'
 import { Icon } from './icon.jsx'
@@ -224,8 +227,12 @@ export function Cron() {
 
 // ---------- job result ----------
 // Job output is untrusted text: `rehypePlugins={[]}` drops the raw-HTML plugin (tags show as text; tables and lists still work),
-// and links/images become plain text so nothing in it can navigate or load.
-const MD = { a: ({ children }) => <span>{children}</span>, img: ({ alt }) => <span>{alt}</span> }
+// images become plain text so nothing loads, and only http(s) links are clickable (any other scheme stays text).
+// Desktop denies a bare target=_blank (nothing opens), so the click goes through ctx.os.openExternal; when that resolves false the link opens as a plain new tab. Without ctx.os the native new tab runs.
+const MD = {
+  a: ({ href, children }) => { const u = webUrl(href); return u ? <a href={u} target="_blank" rel="noopener noreferrer" onClick={e => { const os = R.ctx?.os; if (!os?.openExternal) return; e.preventDefault(); void os.openExternal(u).then(ok => ok || window.open(u, '_blank', 'noopener,noreferrer')) }}>{children}</a> : <span>{children}</span> },
+  img: ({ alt }) => <span>{alt}</span>
+}
 
 function JobText({ text, truncated }) {
   const t = useT(), { size } = useCard(), box = useRef(null), [open, setOpen] = useState(false), [over, setOver] = useState(false)
@@ -247,18 +254,22 @@ function JobText({ text, truncated }) {
 }
 
 export function JobResult() {
-  const t = useT(), { ago } = useTime(), { card } = useCard(), id = card.options.job, cron = useCron()
+  const t = useT(), { ago, when } = useTime(), { card } = useCard(), id = card.options.job, cron = useCron()
   const job = (cron.data || []).find(j => j.job_id === id)
   const q = useJobOutput(cron.isSuccess && !job ? null : id) // a deleted job is not polled
   const base = { title: job?.name || undefined, foot: null }
   if (!id) return { ...base, meta: null, body: <StateBox icon="pinned" title={t('jr.pick')} desc={t('jr.pickD')} action={<Button size="sm" variant="outline" onClick={() => $dlg.set({ kind: 'options', id: card.id })}>{t('jr.choose')}</Button>} /> }
   if (cron.isSuccess && !job) return { ...base, meta: null, body: <Empty text={t('jr.gone')} /> }
   const at = q.data?.latest && (q.data.latest.mtime || q.data.latest.at) // mtime is exact; the file name is in Hermes' timezone, not the browser's
+  const ans = q.data?.latest ? jobAnswer(q.data.latest.text, q.data.latest.truncated) : ''
   return {
     ...base,
     meta: job ? <CronStatus j={job} /> : null,
-    body: <div className="ht-jr" data-jr={card.id}><Q q={q} backend>{d => (d.runs && d.latest ? <JobText text={d.latest.text} truncated={d.latest.truncated} /> : <Empty text={t('jr.none')} />)}</Q></div>,
-    foot: <Updated q={q} extra={<>{at ? <span>{t('jr.ranAt', { time: ago(at) })}</span> : null}<Button size="sm" variant="ghost" onClick={openCron}>{t('jr.open')}</Button></>} />
+    body: <div className="ht-jr" data-jr={card.id}>{job?.prompt_preview?.trim() ? <p className="ht-jr-d" dir="auto" title={job.prompt_preview}>{job.prompt_preview}</p> : null}<Q q={q} backend>{d => {
+      if (!d.runs || !d.latest) return <Empty text={t('jr.none')} />
+      return ans ? <JobText text={ans} truncated={d.latest.truncated} /> : d.latest.truncated ? <p className="ht-state-d">{t('jr.truncated')}</p> : <Empty text={t('jr.silent')} />
+    }}</Q></div>,
+    foot: <Updated q={q} extra={<>{at ? <span>{t('jr.ranAt', { time: ago(at) })}</span> : null}{ans ? <Button size="sm" variant="ghost" aria-label={t('jr.chatL', { job: job?.name || id })} onClick={() => void launch({ prompt: `${job?.name || id} · ${when(at)}\n\n${ans}` })}>{t('jr.chat')}</Button> : null}<Button size="sm" variant="ghost" onClick={openCron}>{t('jr.open')}</Button></>} />
   }
 }
 
@@ -585,6 +596,52 @@ export function Activity() {
   }
 }
 
+// ---------- live tasks: one block per Main chat. A row per lane (who | one bar for a Worker, a count for Main | time); the bar fills with elapsed time toward this Worker's usual duration. Worker previews are Hermes' own redacted one-liners, Main shows tool names only. ----------
+const LV_TONE = { running: 'accent', done: 'ok', failed: 'bad' }
+const stepLabel = (t, name) => { const k = toolKey(name); return k ? t('lv.t.' + k) : <Ltr>{name}</Ltr> }
+
+function Lane({ lane, sec }) {
+  const t = useT(), { dur } = useTime(), run = lane.state === 'running', live = run || lane.state === 'waiting', w = lane.kind === 'worker', now = lane.now, u = run ? lane.usual : null
+  const name = lane.title || (w ? '' : t('ses.untitled')), bad = lane.blocks.filter(b => !b.ok).length
+  const status = run ? (lane.late ? t('lv.late') : now ? stepLabel(t, now.tool) : t('lv.thinking')) : lane.state === 'waiting' ? t('lv.waiting') : lane.state === 'done' || lane.state === 'failed' ? t(lane.state === 'done' ? 'wk.done' : 'wk.failed') : null
+  const secs = (live ? sec.t1 : lane.end) - lane.start, pct = u && !lane.late ? Math.min(100, (sec.t1 - lane.start) / u.hi * 100) : 100
+  const tip = t('lv.stripL', { ok: lane.blocks.length - bad, failed: bad }) + (u ? `. ${t('lv.usual', { a: dur(u.lo), b: dur(u.hi), n: u.n })}` : '')
+  const info = [w ? `${t('lv.worker', { n: lane.index + 1 })} · ${lane.model || '—'}` : '', Number.isFinite(lane.steps) ? t('lv.steps', { n: lane.steps }) : ''].filter(Boolean).join(' · ')
+  const body = <>
+    <span className="ht-lv-who">
+      <Tone tone={LV_TONE[lane.state]} />
+      <span className="ht-lv-n">
+        <span className="ht-lv-t" title={info ? `${name}\n${info}` : name}><Auto>{name}</Auto></span>
+        {status ? <span className="ht-lv-m" title={w && now?.text ? `${now.tool} · ${maskSecrets(now.text)}` : undefined}>{status}</span> : null}
+      </span>
+    </span>
+    {w ? <span className="ht-lv-bar" role="img" aria-label={tip} title={tip}><span className="ht-lv-f" aria-hidden="true" data-late={lane.late ? '' : undefined} data-none={run && !u ? '' : undefined} style={{ inlineSize: `${pct}%` }} /></span>
+      : <span className="ht-lv-of">{sec.total ? t('lv.ofDone', { done: sec.done, n: sec.total }) : ''}</span>}
+    <span className="ht-lv-tm">{Number.isFinite(secs) ? dur(secs) : ''}</span>
+  </>
+  return <li className="ht-lv-li">{sec.main ? <button type="button" className="ht-lv-r" data-state={lane.state} data-w={w ? '' : undefined} onClick={() => host.openSession(sec.id)}>{body}</button> : <div className="ht-lv-r" data-state={lane.state} data-w={w ? '' : undefined}>{body}</div>}</li>
+}
+
+// Never a percentage of the whole task or an ETA: Hermes gives no total. A Worker's bar only compares its elapsed time with how long this user's earlier Workers took.
+const Section = ({ s }) => <div className="ht-lv-s"><ul className="ht-lv-l">{[s.main, ...s.workers].filter(Boolean).map(l => <Lane key={l.key} lane={l} sec={s} />)}</ul></div>
+
+export function Live() {
+  const t = useT(), { n } = useTime(), q = useLive(), act = useActive(), hist = useWorkerHistory().data?.workers
+  const v = q.data?.available ? liveView(q.data, act.data, hist) : null
+  return {
+    meta: v?.running ? <span className="ht-count">{n(v.running)}</span> : null,
+    body: <Q q={q} backend>{d => {
+      const w = v || liveView(d, act.data, hist)
+      return <>
+        {w.sections.map(s => <Section key={s.id} s={s} />)}
+        {!w.sections.length ? <Empty text={t('lv.none')} /> : null}
+        {w.last ? <><h3 className="ht-sub-t">{t('lv.last')}</h3><Section s={w.last} /></> : null}
+      </>
+    }}</Q>,
+    foot: <Updated q={q} />
+  }
+}
+
 export const settingsHref = page => pluginSettingsHref('ultimate-dashboard', page)
 
-export const BODIES = { approvals: Approvals, 'recent-sessions': RecentSessions, cron: Cron, usage: Usage, 'recent-files': RecentFiles, services: Services, machine: Machine, workers: Workers, 'job-result': JobResult, health: Health, logs: Logs, memory: Memory, skills: Skills, spend: Spend, activity: Activity }
+export const BODIES = { approvals: Approvals, 'recent-sessions': RecentSessions, cron: Cron, usage: Usage, 'recent-files': RecentFiles, services: Services, machine: Machine, workers: Workers, 'job-result': JobResult, health: Health, logs: Logs, memory: Memory, skills: Skills, spend: Spend, activity: Activity, live: Live }

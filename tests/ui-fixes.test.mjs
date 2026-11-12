@@ -100,9 +100,14 @@ test('a11y wording: current-chat shortcut label, Health link names, one name per
   for (const k of ['ql.launchCurrentL', 'hl.openL', 'cron.day']) for (const l of ['en', 'ar']) assert.equal(typeof FLAT[l][k], 'string', `${l} ${k}`)
 })
 
+test('job result links: the click goes through ctx.os.openExternal and falls back on its false, never through the raw bridge', () => {
+  assert.doesNotMatch(cards, /window\.hermesDesktop/)
+  assert.match(cards, /os\.openExternal\(u\)\.then\(ok => ok \|\| window\.open\(u, '_blank', 'noopener,noreferrer'\)\)/)
+})
+
 test('sub-headings are h3 under the h2 card titles; the day label separator comes from i18n', () => {
   assert.doesNotMatch(cards, /<p className="ht-sub-t"/)
-  assert.equal((cards.match(/<h3 className="ht-sub-t">/g) || []).length, 7)
+  assert.equal((cards.match(/<h3 className="ht-sub-t">/g) || []).length, 8)
   assert.match(page, /<h2 className="ht-card-t"/)
   assert.match(cards, /t\('cron\.day', \{ rel:/)
   assert.doesNotMatch(cards, /\+ ', '/)

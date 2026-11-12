@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import re
 import socket
@@ -22,7 +22,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 PLUGIN = "ultimate-dashboard"
-VERSION = "0.4.1"
+VERSION = "0.5.0"
 FILES_SCAN_ROWS = 300
 SCHEMA = 1
 MAX_DOC_BYTES = 262144
@@ -35,6 +35,9 @@ MEMORY_DELIMITER = "\n§\n"  # tools/memory_tool_store.py ENTRY_DELIMITER
 BUILTIN_MEMORY = {"", "default", "builtin", "built-in", "none"}  # memory.provider values that mean no external provider
 MAX_USAGE_BYTES = 1048576  # a real file is ~70 KB for 135 skills
 MAX_USAGE_SKILLS = 2000
+MAX_LIVE_MANIFEST_BYTES = 65536
+MAX_LIVE_LOG_BYTES = 262144
+LIVE_KEEP_S, LIVE_STALE_S, LIVE_MAIN_S = 1800, 900, 600  # a finished run stays 30 min; no log activity for 15 min = stalled; a chat counts as live for 10 min after its last tool row
 router = APIRouter()
 _lock = threading.Lock()  # serialises read-modify-write of the state file
 # POSIX (/x), Windows drive (C:\x or C:/x) and UNC (\\server\x) paths; a bare "MEDIA:C:" or "MEDIA:Cool" never matches.
@@ -465,3 +468,181 @@ def activity(days: str | None = None, limit: str | None = None):
                 "tools": [dict(r) for r in tools], "feed": [{**dict(r), "ok": bool(r["ok"])} for r in feed]}
     except Exception as exc:  # noqa: BLE001
         return _unavailable(f"cannot read sessions: {type(exc).__name__}")
+
+
+# ---------- /live: what Main and each Worker are doing now ----------
+# Worker logs are Hermes' own delegation transcripts (tools/delegation_live_log.py): `HH:MM:SS role     | text`, already credential-redacted. Only the shape
+# is read: tool names, the redacted one-line tool preview, ok/ERROR and seconds, and the status word of `final`. think/assistant/user/start text, result
+# text and the final summary are never returned. Main chats come from state.db, which is NOT redacted: names only, never arguments or content.
+_LIVE_DIR = re.compile(r"deleg_[0-9a-f]{8}(-\d+)?")
+_LIVE_LINE = re.compile(r"(\d\d):(\d\d):(\d\d) (\w+)\s*\| (.*)")
+_LIVE_RESULT = re.compile(r"(\S+) (ok|ERROR)(?: (\d+(?:\.\d+)?)s)?:")
+_LIVE_STATUS = re.compile(r"(?:end )?status=(\w+)")
+_LIVE_FMT = "%Y-%m-%d %H:%M:%S"
+
+
+def _live_root() -> Path:
+    from hermes_constants import get_hermes_dir
+    return get_hermes_dir("cache/delegation", "delegation_cache", home=_home()) / "live"
+
+
+def _live_epoch(v) -> float | None:
+    try:
+        return datetime.strptime(v, _LIVE_FMT).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _live_log(path: Path, start: float) -> dict:
+    """Steps of one task log. shortcut: a log cut at 256 KB keeps the date of the manifest start, so a midnight crossed before the cut is missed."""
+    with path.open("rb") as f:
+        size = os.fstat(f.fileno()).st_size
+        cut = size > MAX_LIVE_LOG_BYTES
+        if cut:
+            f.seek(size - MAX_LIVE_LOG_BYTES)
+        raw = f.read(MAX_LIVE_LOG_BYTES)
+    lines = raw.decode("utf-8", errors="replace").split("\n")[int(cut):-1]  # drop the cut first line and the unfinished last one (Hermes ends every line with \n)
+    d0 = datetime.fromtimestamp(start).replace(hour=0, minute=0, second=0, microsecond=0)
+    day, prev = 0, int(start - d0.timestamp())
+    steps, pending, last, final = 0, [], [], None  # pending = tool lines without a result yet, oldest first
+    for ln in lines:
+        m = _LIVE_LINE.fullmatch(ln)
+        if not m:
+            continue
+        sod = int(m[1]) * 3600 + int(m[2]) * 60 + int(m[3])
+        day += sod < prev  # the clock went back: midnight passed
+        prev = sod
+        at, role, text = (d0 + timedelta(days=day, seconds=sod)).timestamp(), m[4], m[5]
+        if role == "tool" and text.startswith("-> "):
+            name, _, rest = text[3:].partition("(")
+            steps += 1
+            pending.append({"at": at, "tool": name[:64], "text": rest.removesuffix(")")[:220]})
+        elif role == "result" and (r := _LIVE_RESULT.match(text)):
+            i = next((i for i, p in enumerate(pending) if p["tool"] == r[1][:64]), None)  # FIFO per tool name: parallel calls pair in order
+            p = pending.pop(i) if i is not None else None
+            secs = float(r[3]) if r[3] else max(0.0, at - p["at"]) if p else 0.0
+            last.append({"at": p["at"] if p else at - secs, "tool": r[1][:64], "ok": r[2] == "ok", "secs": secs})
+        elif role == "final" and (s := _LIVE_STATUS.match(text)):
+            final = {"at": at, "status": s[1]}
+    return {"steps": steps, "now": pending[-1] if pending else None, "last": sorted(last, key=lambda s: s["at"])[-400:], "final": final, "truncated": cut}
+
+
+def _live_parent(conn, start: float, goals: list[str]) -> str | None:
+    """The chat that delegated: subagent sessions started within 5 s whose title (cut from the goal, maybe with `…` and ` #2`) is a prefix of a goal. The chat matched by the
+    most tasks wins; a tie goes to the one whose matching row started closest to the batch start. With no titled match, untitled rows (one-shot CLI chats leave the title NULL) vote
+    the same way, each parent counting at most one row per task. A row whose title matches no goal (untitled, or cut from the context block) but whose first message holds the start of a goal votes like a titled match (the message is only compared, never returned or logged: state.db is not redacted)."""
+    flat = [" ".join(g.split()) for g in goals]
+    tasks: dict[str, set[int]] = {}
+    blank: dict[str, int] = {}
+    gap: dict[str, float] = {}
+    bgap: dict[str, float] = {}
+    for r in conn.execute("SELECT id, title, parent_session_id, started_at FROM sessions WHERE source = 'subagent' AND started_at BETWEEN ? AND ? AND parent_session_id IS NOT NULL", (start - 5, start + 5)):
+        p, d = r["parent_session_id"], abs(r["started_at"] - start)
+        title = re.sub(r"(…|\.\.\.)$", "", re.sub(r" #\d+$", "", " ".join((r["title"] or "").removeprefix("Subagent: ").split()))).rstrip()
+        hit = {i for i, g in enumerate(flat) if title and g.startswith(title)}
+        if not hit:  # no title, or one cut from the context block instead of the goal ("CONTEXT: #2")
+            try:
+                text = " ".join(str((conn.execute("SELECT substr(content, 1, 20000) FROM messages WHERE session_id = ? ORDER BY id LIMIT 1", (r["id"],)).fetchone() or [""])[0] or "").split())
+            except sqlite3.Error:
+                text = ""
+            hit = {i for i, g in enumerate(flat) if len(g) >= 12 and g[:60] in text}
+        if hit:
+            tasks.setdefault(p, set()).update(hit)
+            gap[p] = min(gap.get(p, 9e9), d)
+        elif not title:
+            blank[p], bgap[p] = blank.get(p, 0) + 1, min(bgap.get(p, 9e9), d)
+    if tasks:
+        return min(tasks, key=lambda p: (-len(tasks[p]), gap[p]))
+    return min(blank, key=lambda p: (-min(blank[p], len(flat)), bgap[p]), default=None)
+
+
+def _live_group(folder: Path, root: Path, now: float) -> dict | None:
+    if not _LIVE_DIR.fullmatch(folder.name) or folder.is_symlink() or not folder.is_dir() or folder.resolve().parent != root:
+        return None
+    mp = folder / "manifest.json"
+    if mp.is_symlink() or not mp.is_file():
+        return None
+    try:
+        with mp.open("rb") as f:
+            mf = json.loads(f.read(MAX_LIVE_MANIFEST_BYTES))
+    except (OSError, ValueError, RecursionError):
+        return None
+    start = _live_epoch(mf.get("started")) if isinstance(mf, dict) else None
+    if start is None or not isinstance(mf.get("tasks"), list):
+        return None
+    done = _live_epoch(mf.get("completed")) if mf.get("completed") else None
+    if mf.get("completed") and (done is None or now - done > LIVE_KEEP_S):
+        return None
+    tasks, mtimes = [], []
+    for t in mf["tasks"][:10]:
+        i = t.get("index") if isinstance(t, dict) else None
+        if type(i) is not int or not 0 <= i < 1000:
+            continue
+        log, parsed = folder / f"task-{i}.log", {"steps": 0, "now": None, "last": [], "final": None, "truncated": False}
+        if log.is_file() and not log.is_symlink():
+            parsed = _live_log(log, start)
+            mtimes.append(log.stat().st_mtime)
+        tasks.append({"index": i, "goal": str(t.get("goal") or "")[:500], "model": t.get("model") or mf.get("model"), "started": start, "t": t, **parsed})
+    idle = now - max(mtimes, default=start)
+    if not mf.get("completed") and idle > LIVE_KEEP_S:  # a batch a crashed gateway left behind is history, not live
+        return None
+    running = not mf.get("completed") and bool(mtimes) and idle < LIVE_STALE_S
+    for k in tasks:
+        t, fin = k.pop("t"), k.pop("final")
+        if fin:
+            k["ended"], k["status"] = fin["at"], fin["status"]
+        elif mf.get("completed"):
+            k["ended"], k["status"] = done, "stalled" if t.get("status") in (None, "running") else str(t["status"])[:32]
+        else:
+            k["ended"], k["status"] = None, "running" if running else "stalled"
+        if k["status"] != "running":
+            k["now"] = None
+    return {"id": folder.name, "started": start, "completed": done, "running": running, "parent": None, "tasks": tasks}
+
+
+def _live_main(conn, sid: str, now: float) -> dict:
+    row = conn.execute("SELECT title, source FROM sessions WHERE id = ?", (sid,)).fetchone()
+    u = conn.execute("SELECT id, timestamp FROM messages WHERE session_id = ? AND role = 'user' AND active = 1 ORDER BY id DESC LIMIT 1", (sid,)).fetchone()
+    user, turn_at = (u[0], u[1]) if u else (0, None)
+    steps = conn.execute("SELECT COUNT(*) FROM messages WHERE session_id = ? AND role = 'tool' AND active = 1 AND id > ?", (sid, user)).fetchone()[0]
+    # a tool row is written when its result arrives, so a step started when the row before it (the call or the previous result) was written
+    rows = conn.execute(f"SELECT m.tool_name AS tool, m.timestamp AS ended, ({_TOOL_FAILED}) = 0 AS ok, (SELECT p.timestamp FROM messages p WHERE p.session_id = m.session_id AND p.active = 1 AND p.id < m.id "
+                        "ORDER BY p.id DESC LIMIT 1) AS began FROM messages m WHERE m.session_id = ? AND m.role = 'tool' AND m.active = 1 AND m.tool_name IS NOT NULL AND m.timestamp IS NOT NULL AND m.id > ? "
+                        "ORDER BY m.id DESC LIMIT 400", (sid, user)).fetchall()[::-1]
+    # the newest assistant row decides: its tool calls that have no tool row yet are running (names only; the arguments stay in the db)
+    a = conn.execute("SELECT id, tool_calls, timestamp FROM messages WHERE session_id = ? AND role = 'assistant' AND active = 1 ORDER BY id DESC LIMIT 1", (sid,)).fetchone()
+    names = []
+    if a and a["tool_calls"] and now - (a["timestamp"] or 0) < LIVE_STALE_S:
+        try:
+            calls = [c for c in json.loads(a["tool_calls"]) if isinstance(c, dict)]
+        except (ValueError, RecursionError):
+            calls = []
+        done = {r[0] for r in conn.execute("SELECT tool_call_id FROM messages WHERE session_id = ? AND role = 'tool' AND active = 1 AND id > ?", (sid, a["id"]))}
+        names = [str((c.get("function") or {}).get("name") or "?")[:64] for c in calls if (c.get("id") or c.get("call_id")) not in done]
+    stamp = conn.execute("SELECT MAX(timestamp) FROM messages WHERE session_id = ? AND active = 1", (sid,)).fetchone()[0]
+    return {"id": sid, "title": str((row and row["title"]) or "")[:200], "source": row and row["source"], "last_at": stamp, "steps": steps, "turn_at": turn_at,
+            "now": {"at": a["timestamp"], "tools": names} if names else None,
+            "last": [{"at": r["began"] or r["ended"], "tool": r["tool"], "ok": bool(r["ok"]), "secs": max(0.0, r["ended"] - (r["began"] or r["ended"]))} for r in rows]}
+
+
+@router.get("/live")
+def live():
+    try:
+        root, now = _live_root(), time.time()
+        if not root.is_dir():
+            return {"available": True, "at": now, "running": False, "groups": [], "mains": []}
+        root = root.resolve()
+        folders = sorted((p for p in root.iterdir() if _LIVE_DIR.fullmatch(p.name)), key=lambda p: p.stat().st_mtime, reverse=True)[:200]
+        groups = sorted((g for g in (_live_group(p, root, now) for p in folders) if g), key=lambda g: g["started"], reverse=True)[:8]
+        with closing(_db()) as conn:
+            for g in groups:
+                g["parent"] = _live_parent(conn, g["started"], [k["goal"] for k in g["tasks"]])
+            parents = list(dict.fromkeys(g["parent"] for g in groups if g["parent"]))
+            # shortcut: only the newest 4000 messages are scanned (messages has no timestamp index; a full scan took ~140 ms); a busy machine could miss a chat quiet for 10 min
+            extra = [r[0] for r in conn.execute(
+                "SELECT m.session_id FROM messages m JOIN sessions s ON s.id = m.session_id WHERE m.id > (SELECT MAX(id) FROM messages) - 4000 AND m.role = 'tool' AND m.active = 1 AND m.timestamp >= ? "
+                "AND COALESCE(s.source, '') NOT IN ('subagent', 'tool') GROUP BY m.session_id ORDER BY MAX(m.timestamp) DESC LIMIT ?", (now - LIVE_MAIN_S, len(parents) + 5))]
+            mains = [_live_main(conn, sid, now) for sid in parents + [e for e in extra if e not in parents][:5]]
+        return {"available": True, "at": now, "running": any(g["running"] for g in groups) or any(m["now"] for m in mains), "groups": groups, "mains": mains}
+    except Exception as exc:  # noqa: BLE001
+        return _unavailable(f"cannot read live tasks: {type(exc).__name__}")

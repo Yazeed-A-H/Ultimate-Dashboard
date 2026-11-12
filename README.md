@@ -1,6 +1,6 @@
 # Ultimate Dashboard
 
-![Ultimate Dashboard demo: the 15 cards, editing the layout, views and Quick launch](docs/demo.webp)
+![Ultimate Dashboard demo: the cards, editing the layout, views and Quick launch](docs/demo.webp)
 
 A dashboard page for Hermes Desktop and the Webapp. It puts what your agent is doing on one screen: commands waiting for your approval, running sessions, scheduled jobs, usage and spend, and the health of the gateway and the machine it runs on. You choose the cards and arrange them, and the layout is shared between Desktop and the Webapp.
 
@@ -31,6 +31,7 @@ Enable the plugin in every Hermes profile that should show data. Other install m
 | Usage | Plan usage per provider (from `hermes usage`), with the one nearest its limit first. |
 | Spend | Tokens and estimated cost by model, and the biggest sessions. |
 | Activity | Recent tool calls, and which tools fail most. |
+| Live tasks | What the main agent and each Worker are doing right now, with a progress bar per Worker. |
 | Health | One light for the gateway, platforms, scheduled jobs, MCP servers, usage and disk, with what to fix first. |
 | Services | Gateway, platforms and version. |
 | Machine | CPU, memory, disk and uptime, with a warning when the load is high. |
@@ -66,7 +67,7 @@ Quick launch sits above the cards: shortcuts that type a skill or a prompt into 
 
 No telemetry, no third-party servers. The page talks only to your Hermes gateway. The one outside contact is indirect: the Usage card runs `hermes usage` on the gateway, which asks each signed-in provider for your plan usage.
 
-The backend reads `state.db` read-only, scheduled job output files in `cron/output` (read only), the size, modified time and character count of `memories/MEMORY.md` and `memories/USER.md` (never their text) with your memory settings, the dates in `skills/.usage.json`, and machine stats with `psutil`, and keeps the layout in `plugin-data/ultimate-dashboard/state.json`. Anyone signed in to your dashboard can see the session titles and file paths the cards show. A layout export includes your shortcut prompt text.
+The backend reads `state.db` read-only, scheduled job output files in `cron/output` (read only), the size, modified time and character count of `memories/MEMORY.md` and `memories/USER.md` (never their text) with your memory settings, the dates in `skills/.usage.json`, Hermes' Worker transcripts in `cache/delegation/live` (read only: goals, tool names and one-line command previews, never result text), and machine stats with `psutil`, and keeps the layout in `plugin-data/ultimate-dashboard/state.json`. Anyone signed in to your dashboard can see the session titles, file paths, Worker goals and command previews the cards show. A layout export includes your shortcut prompt text.
 
 The full list (RPC methods, shell command, reads, storage, background timers) is in [plugin/README.md](plugin/README.md#disclosure-what-the-plugin-reads-runs-stores-and-sends).
 
